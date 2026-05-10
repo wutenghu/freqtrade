@@ -5,11 +5,12 @@
 | 项目 | 内容 |
 |------|------|
 | 实验日期 | 2026-05-10 |
-| 实验版本 | **v4 (波动率动态调仓)** |
-| 策略名称 | SmaVwapStrategy |
+| 实验版本 | **v4 (波动率动态调仓, 20 品种)** |
+| 策略名称 | SmaVwapStrategy (v4) / SmaVwapStrategyV3 (v3) |
 | 文件路径 | `user_data/strategies/SmaVwapStrategy.py` |
 | 配置文件 | `config_backtest.json` |
 | 交易所 | Binance (现货) |
+| 交易品种 | 20 个主流 USDT 交易对 |
 | 报告路径 | `reports/experiment_2026-05-10_SmaVwapStrategy.md` |
 
 ---
@@ -18,145 +19,68 @@
 
 | 版本 | 变更 |
 |------|------|
-| v2 | 合约，多空双向，无限制持仓，0.04% 费率 |
-| v3 | 现货，仅做多，无限制持仓，0.04% 费率 |
-| **v4 (当前)** | **v3 + ATR波动率动态调仓** |
+| v2 | 合约，多空双向，无限制持仓，10 品种 |
+| v3 | 现货，仅做多，无限制持仓，10 品种，0.04% 费率 |
+| **v4 (当前)** | **v3 基础 + ATR 波动率动态调仓 + 扩展到 20 品种** |
 
 ---
 
-## v4 新增功能：波动率动态调仓
+## v4 核心改进：波动率动态调仓
 
-### 原理
+使用 ATR(14) 计算每个品种的波动率百分比，波动率越大的品种仓位越小，波动率越小的品种仓位越大。ATR 基准值来自预热区（前 60 根 K 线，无交易信号），无未来数据泄露。
 
-使用 ATR(14) 计算每个交易对的波动率百分比（ATR / 价格 × 100），**波动率越大的品种仓位越小，波动率越小的品种仓位越大**，使每个品种的风险贡献度趋于一致。
+| 品种 | ATR% | 仓位系数 | 实际开仓 |
+|------|------|---------|---------|
+| TRX/USDT | 0.62% | ×3.0 | ~300 USDT |
+| BNB/USDT | 1.19% | ×1.6 | ~160 USDT |
+| BTC/USDT | 1.27% | ×1.5 | ~149 USDT |
+| XRP/USDT | 1.27% | ×1.5 | ~150 USDT |
+| LTC/USDT | 1.35% | ×1.4 | ~141 USDT |
+| XLM/USDT | 1.35% | ×1.4 | ~141 USDT |
+| ETH/USDT | 1.40% | ×1.4 | ~136 USDT |
+| ADA/USDT | 1.66% | ×1.1 | ~115 USDT |
+| DOT/USDT | 1.80% | ×1.1 | ~106 USDT |
+| ARB/USDT | 1.98% | ×1.0 | ~96 USDT |
+| FIL/USDT | 2.00% | ×1.0 | ~95 USDT |
+| VET/USDT | 2.04% | ×0.9 | ~93 USDT |
+| LINK/USDT | 2.21% | ×0.9 | ~86 USDT |
+| AVAX/USDT | 2.28% | ×0.8 | ~84 USDT |
+| APT/USDT | 2.30% | ×0.8 | ~83 USDT |
+| OP/USDT | 2.40% | ×0.8 | ~79 USDT |
+| SOL/USDT | 2.46% | ×0.8 | ~77 USDT |
+| DOGE/USDT | 2.65% | ×0.7 | ~72 USDT |
+| TON/USDT | 2.88% | ×0.7 | ~66 USDT |
+| SUI/USDT | 2.95% | ×0.6 | ~64 USDT |
 
-### 品种波动率与仓位调整系数
-
-品种的 ATR% 基准值来自预热区（前 60 根 K 线，无交易信号），无未来数据泄露。
-
-| 品种 | 预热区 ATR% | 仓位系数 | 实际开仓 |
-|------|------------|---------|---------|
-| BNB/USDT | 1.19% | ×1.5 | ~150 USDT |
-| BTC/USDT | 1.27% | ×1.4 | ~143 USDT |
-| XRP/USDT | 1.27% | ×1.4 | ~143 USDT |
-| ETH/USDT | 1.40% | ×1.3 | ~130 USDT |
-| ADA/USDT | 1.66% | ×1.1 | ~109 USDT |
-| DOT/USDT | 1.80% | ×1.0 | ~101 USDT |
-| LINK/USDT | 2.21% | ×0.8 | ~82 USDT |
-| AVAX/USDT | 2.28% | ×0.8 | ~79 USDT |
-| SOL/USDT | 2.46% | ×0.7 | ~73 USDT |
-| DOGE/USDT | 2.65% | ×0.7 | ~68 USDT |
-
-全品种平均 ATR = ~1.8% 作为基准线。ATR 越低 → 仓位越大，ATR 越高 → 仓位越小。
-
-### 核心代码
-
-```python
-def populate_indicators(self, dataframe, metadata):
-    # ATR(14) 波动率（百分比）
-    dataframe["atr_pct"] = ta.ATR(dataframe, timeperiod=14) / dataframe["close"] * 100
-    # 只用预热区（前 60 根 K 线）计算静态波动率基准
-    lookback = min(60, len(dataframe))
-    avg_atr = float(dataframe["atr_pct"].iloc[:lookback].mean())
-    self.atr_cache[pair] = avg_atr if not np.isnan(avg_atr) else 3.0
-    ...
-
-def custom_stake_amount(self, pair, ...) -> float:
-    # 全品种平均 ATR 作为动态基准
-    if self._baseline_atr is None:
-        values = [v for v in self.atr_cache.values() if v > 0]
-        self._baseline_atr = sum(values) / len(values)
-    atr_pct = self.atr_cache.get(pair, self._baseline_atr)
-    ratio = self._baseline_atr / max(atr_pct, 0.5)   # 波动大→仓位小
-    ratio = min(max(ratio, 0.3), 3.0)                 # 限制 0.3x ~ 3x
-    return proposed_stake * ratio
-```
+> 全品种平均 ATR = 1.90% 作为基准线。
 
 ---
 
-## 策略源代码（完整）
+## 策略逻辑
 
-```python
-import numpy as np
-from freqtrade.strategy import IStrategy
-from pandas import DataFrame
-import talib.abstract as ta
+### 做多入场（全部满足）
 
+1. `close > SMA(50)` —— 收盘价站上 50 周期均线
+2. `SMA(50).diff(5) > 0` —— 均线斜率向上
+3. `close > VWAP(6)` —— 收盘价高于 6 周期（24 小时）VWAP
+4. `volume > 0`
 
-class SmaVwapStrategy(IStrategy):
-    INTERFACE_VERSION = 3
+### 做多出场
 
-    timeframe = "4h"
-    can_short = False
+- **信号出场**: `close < SMA(50)`
+- **止损**: -15%
+- **止盈 (ROI)**: +30%
 
-    stoploss = -0.15
-    minimal_roi = {"0": 0.30}
+### 策略属性
 
-    startup_candle_count: int = 60
-
-    process_only_new_candles = True
-    use_exit_signal = True
-    exit_profit_only = False
-
-    atr_cache: dict = {}
-    _baseline_atr: float | None = None
-
-    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        pair = metadata["pair"]
-
-        dataframe["sma50"] = ta.SMA(dataframe, timeperiod=50)
-        dataframe["sma50_diff5"] = dataframe["sma50"].diff(5)
-        dataframe["vwap6"] = (
-            (dataframe["volume"] * (dataframe["high"] + dataframe["low"] + dataframe["close"]) / 3)
-            .rolling(6)
-            .sum()
-        ) / dataframe["volume"].rolling(6).sum()
-
-        dataframe["atr_pct"] = ta.ATR(dataframe, timeperiod=14) / dataframe["close"] * 100
-
-        lookback = min(60, len(dataframe))
-        avg_atr = float(dataframe["atr_pct"].iloc[:lookback].mean())
-        self.atr_cache[pair] = avg_atr if not np.isnan(avg_atr) else 3.0
-
-        return dataframe
-
-    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            (
-                (dataframe["close"] > dataframe["sma50"])
-                & (dataframe["sma50_diff5"] > 0)
-                & (dataframe["close"] > dataframe["vwap6"])
-                & (dataframe["volume"] > 0)
-            ),
-            "enter_long",
-        ] = 1
-        return dataframe
-
-    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            ((dataframe["close"] < dataframe["sma50"]) & (dataframe["volume"] > 0)),
-            "exit_long",
-        ] = 1
-        return dataframe
-
-    def custom_stake_amount(
-        self, pair, current_time, current_rate, proposed_stake,
-        min_stake, max_stake, leverage, entry_tag, side, **kwargs
-    ) -> float:
-        if self._baseline_atr is None:
-            values = [v for v in self.atr_cache.values() if v > 0]
-            self._baseline_atr = sum(values) / len(values) if values else 3.0
-
-        atr_pct = self.atr_cache.get(pair, self._baseline_atr)
-        ratio = self._baseline_atr / max(atr_pct, 0.5)
-        ratio = min(max(ratio, 0.3), 3.0)
-
-        adjusted = proposed_stake * ratio
-        if min_stake is not None:
-            adjusted = max(adjusted, min_stake)
-        adjusted = min(adjusted, max_stake)
-        return adjusted
-```
+| 属性 | 值 |
+|------|-----|
+| 时间周期 | 4h |
+| 初始资金 | 10,000 USDT |
+| 基准单笔 | 100 USDT |
+| 最大持仓 | 无限制 |
+| 交易方向 | 仅做多 |
+| 手续费 | 0.04%（买卖各付） |
 
 ---
 
@@ -167,121 +91,122 @@ class SmaVwapStrategy(IStrategy):
 | 开始日期 | 2024-05-20 00:00:00 |
 | 结束日期 | 2026-05-10 08:00:00 |
 | 数据长度 | 720 天 (~2年) |
-| K线数量 | 每个交易对 4,383 根 4h K线 (现货) |
+| 交易品种 | 20 个 |
 | 手续费 | 0.04% |
 
 ---
 
-## 总体结果
+## v3 vs v4 对比总表
 
-| 指标 | 值 |
-|------|-----|
-| 起始资金 | 10,000.00 USDT |
-| **最终余额** | **10,607.81 USDT** |
-| **总盈亏** | **+607.81 USDT (+6.08%)** |
-| 总交易数 | 929 |
-| 日均交易数 | 1.29 |
-| 平均单笔仓位 | 107.92 USDT (原基准 100) |
-| 总交易额 | 201,288.53 USDT |
-| 市场变化参考 | -11.99% (同期大盘) |
+| 指标 | v3 (固定 100 USDT) | **v4 (ATR 动态调仓)** | 变化 |
+|------|-------------------|---------------------|------|
+| 总交易数 | 1,829 | 1,829 | 相同 |
+| 总盈亏 | +612.43 USDT (+6.12%) | **+834.48 USDT (+8.34%)** | **+222.05** |
+| **Sharpe** | 1.99 | **2.25** | **+0.26** |
+| **Sortino** | 5.67 | **6.09** | +0.42 |
+| **CAGR** | 3.06% | **4.15%** | **+1.09%** |
+| **SQN** | 1.76 | **1.99** | +0.23 |
+| **Profit Factor** | 1.16 | **1.20** | +0.04 |
+| 最大回撤 | 8.58% | 9.05% | +0.47% |
+| 最大连续亏损 | 67 | 67 | 相同 |
+| 平均仓位 | 99.91 USDT | **116.67 USDT** | +16.76 |
+| 总交易额 | 366,374 USDT | **427,957 USDT** | +61,583 |
 
----
-
-## 四版本对比
-
-| 指标 | v2 | v3 | **v4 (当前)** |
-|------|-----|-----|-----|
-| 方向 | 多空 | 仅做多 | **仅做多** |
-| 最大持仓 | 无限制 | 无限制 | **无限制** |
-| 费率 | 0.04% | 0.04% | **0.04%** |
-| 调仓 | 固定 | 固定 | **ATR动态** |
-| 总盈亏 | +449.65 (4.50%) | +532.16 (5.32%) | **+607.81 (6.08%)** |
-| **Sharpe** | 1.58 | 1.77 | **1.88** |
-| **Sortino** | 4.10 | 5.60 | **6.01** |
-| **Calmar** | 2.82 | 4.08 | **4.75** |
-| **SQN** | 1.36 | 2.18 | **2.33** |
-| **Profit Factor** | 1.12 | 1.30 | **1.34** |
-| **CAGR** | 2.25% | 2.66% | **3.04%** |
-| 最大回撤 | 4.24% | 3.46% | **3.40%** |
-| 最大连续亏损 | 44 | 36 | **36** |
-| 平均仓位 | 96.98 | 99.86 | **107.92** |
-
-> v4 的各项风险指标全面优于 v3。波动率调仓在不增加回撤的前提下，将 Sharpe 从 1.77 提升至 1.88，CAGR 从 2.66% 提升至 3.04%。
+> v4 相较 v3，在仅增加少量回撤（8.58% → 9.05%）的前提下，总利润提升 36%（+222 USDT），Sharpe 从 1.99 提升至 2.25。
 
 ---
 
-## 按交易对分解（v3 vs v4 对比）
+## 按交易对分解（v3 vs v4）
 
-| 交易对 | v3 盈亏 | v4 盈亏 | 变化 | ATR% | 仓位系数 |
-|--------|---------|---------|------|------|---------|
-| XRP/USDT | +180.48 | **+258.27** | +77.79 | 1.27% | ×1.4 |
-| BTC/USDT | +44.71 | **+63.84** | +19.13 | 1.27% | ×1.4 |
-| BNB/USDT | +33.26 | **+50.84** | +17.58 | 1.19% | ×1.5 |
-| ETH/USDT | +33.57 | **+43.53** | +9.96 | 1.40% | ×1.3 |
-| ADA/USDT | +67.44 | **+74.06** | +6.62 | 1.66% | ×1.1 |
-| LINK/USDT | +17.12 | **+14.10** | -3.02 | 2.21% | ×0.8 |
-| DOT/USDT | -20.10 | **-20.35** | -0.25 | 1.80% | ×1.0 |
-| AVAX/USDT | +2.98 | **+2.34** | -0.64 | 2.28% | ×0.8 |
-| SOL/USDT | +51.67 | **+38.20** | -13.47 | 2.46% | ×0.7 |
-| DOGE/USDT | +121.03 | **+82.99** | -38.04 | 2.65% | ×0.7 |
+| 品种 | v3 盈亏 | v4 盈亏 | 变化 | v3 胜率 | v4 ATR% |
+|------|---------|---------|------|---------|---------|
+| XRP/USDT | +180.48 | **+270.25** | +89.77 | 31.2% | 1.27% (×1.5) |
+| XLM/USDT | +167.25 | **+236.49** | +69.24 | 29.6% | 1.35% (×1.4) |
+| TRX/USDT | +41.29 | **+123.90** | +82.61 | 26.9% | 0.62% (×3.0) |
+| SUI/USDT | +130.81 | **+84.28** | -46.53 | 28.6% | 2.95% (×0.6) |
+| DOGE/USDT | +121.03 | **+86.90** | -34.13 | 27.7% | 2.65% (×0.7) |
+| ADA/USDT | +67.44 | **+77.50** | +10.06 | 24.7% | 1.66% (×1.1) |
+| BTC/USDT | +44.71 | **+66.60** | +21.89 | 34.1% | 1.27% (×1.5) |
+| BNB/USDT | +33.26 | **+53.18** | +19.92 | 36.5% | 1.19% (×1.6) |
+| ETH/USDT | +33.57 | **+45.61** | +12.04 | 22.4% | 1.40% (×1.4) |
+| SOL/USDT | +51.67 | **+39.97** | -11.70 | 24.5% | 2.46% (×0.8) |
+| LINK/USDT | +17.12 | **+14.75** | -2.37 | 25.2% | 2.21% (×0.9) |
+| ARB/USDT | +14.61 | **+13.99** | -0.62 | 22.6% | 1.98% (×1.0) |
+| TON/USDT | +10.72 | **+7.10** | -3.62 | 18.4% | 2.88% (×0.7) |
+| VET/USDT | +3.57 | **+3.32** | -0.25 | 25.9% | 2.04% (×0.9) |
+| AVAX/USDT | +2.98 | **+2.32** | -0.66 | 22.0% | 2.28% (×0.8) |
+| DOT/USDT | -20.10 | **-21.28** | -1.18 | 24.4% | 1.80% (×1.1) |
+| FIL/USDT | -56.75 | **-54.12** | +2.63 | 18.5% | 2.00% (×1.0) |
+| APT/USDT | -78.06 | **-64.57** | +13.49 | 22.3% | 2.30% (×0.8) |
+| LTC/USDT | -49.46 | **-69.61** | -20.15 | 19.1% | 1.35% (×1.4) |
+| OP/USDT | -103.71 | **-82.11** | +21.60 | 22.4% | 2.40% (×0.8) |
 
-> XRP (ATR 最低之一的 1.27%) 被加仓，多赚了 +77.79 USDT。
-> DOGE (ATR 最高的 2.65%) 被减仓，少赚了 -38.04 USDT。
-> 整体效果：低波动品种加仓盈利覆盖了高波动品种减仓的损失，净增 +75.65 USDT。
+### 调仓效果分析
 
----
+**加仓后多赚的前 5 名：**
+| 品种 | ATR% | 加仓系数 | 额外盈利 |
+|------|------|---------|---------|
+| XRP/USDT | 1.27% | ×1.5 | +89.77 |
+| TRX/USDT | 0.62% | ×3.0 | +82.61 |
+| XLM/USDT | 1.35% | ×1.4 | +69.24 |
+| BTC/USDT | 1.27% | ×1.5 | +21.89 |
+| OP/USDT | 2.40% | ×0.8 | +21.60 (减少亏损) |
 
-## 按出场原因分解
+**减仓后少赚的前 3 名：**
+| 品种 | ATR% | 减仓系数 | 少赚 |
+|------|------|---------|------|
+| SUI/USDT | 2.95% | ×0.6 | -46.53 |
+| DOGE/USDT | 2.65% | ×0.7 | -34.13 |
+| LTC/USDT | 1.35% | ×1.4 | -20.15 (加仓但亏损扩大) |
 
-| 出场理由 | 次数 | 总盈亏 USDT | 盈亏占比 | 胜率 |
-|---------|------|------------|---------|------|
-| **ROI 止盈 (30%)** | **49** | **+1,515.94** | **+15.16%** | **100%** |
-| 强制平仓 | 8 | +37.55 | +0.38% | 100% |
-| 止损 (-15%) | 8 | -124.95 | -1.25% | 0% |
-| 出场信号 | 864 | -820.73 | -8.21% | 22.6% |
-| **总计** | **929** | **+607.81** | **+6.08%** | **27.1%** |
+> 低波动品种（XRP/TRX/XLM）被加仓后贡献了主要增量盈利。高波动品种（SUI/DOGE）被减仓减少了亏损损失。LTC 是例外——加仓后亏损反而扩大。
 
 ---
 
 ## 详细风险指标
 
-| 指标 | v4 |
-|------|-----|
-| 盈利持仓平均时长 | 6天 12小时 04分 |
-| 亏损持仓平均时长 | 1天 10小时 59分 |
-| 最大连续盈利 | 11 次 |
-| **最大连续亏损** | **36 次** |
-| 最佳单笔 | LINK +30.02% |
-| 最差单笔 | BNB -15.07% |
-| 最佳单日 | +150.93 USDT |
-| 最差单日 | -51.50 USDT |
-| 盈利天数 / 亏损天数 / 平盘 | 103 / 218 / 400 |
+| 指标 | v3 | v4 |
+|------|-----|-----|
+| 盈利持仓平均时长 | 6天+ | 6天+ |
+| 亏损持仓平均时长 | 1天+ | 1天+ |
+| 最大连续盈利 | 17 | 17 |
+| **最大连续亏损** | **67** | **67** |
+| 最佳单日 | — | — |
+| 最差单日 | — | — |
+| 盈利天数 / 亏损天数 | — | — |
 
 ---
 
 ## 分析总结
 
-### v4 改进成果
+### 扩展至 20 品种后 v4 的表现
 
-波动率调仓的核心思路是**让每个品种的风险贡献度一致**。从结果看：
+1. **利润 +222 USDT**：从 +612 → +834，增长 36%
+2. **Sharpe 1.99 → 2.25**：风险调整收益显著提升
+3. **CAGR 3.06% → 4.15%**：年化收益提升 1.09%
+4. **最大回撤仅增加 0.47%**：从 8.58% 到 9.05%
+5. **平均仓位 100 → 117 USDT**：资金利用率提升
 
-1. **Sharpe 1.77 → 1.88**：风险调整收益继续提升
-2. **CAGR 2.66% → 3.04%**：年化收益提升 0.38%
-3. **最大回撤保持 3.40%**：未因加仓而增加回撤
-4. **利润增加 +75.65 USDT**：低波动品种加仓的盈利 > 高波动品种减仓的损失
+### 新加入的 10 个品种表现
 
-### 还剩的短板
+| 品种 | v3 盈亏 | v4 盈亏 | 效果 |
+|------|---------|---------|------|
+| XLM | +167 → **+236** | 低波动，加仓后多赚 +69 |
+| TRX | +41 → **+124** | ATR 最低 0.62%，3 倍仓位后多赚 +83 |
+| SUI | +131 → **+84** | 高波动 2.95%，减仓后少赚 -47（合理） |
+| LTC | -49 → **-70** | 低波动 1.35% 被加仓但本身亏损，放大损失 |
+| OP | -104 → **-82** | 高波动 2.40% 被减仓，减少亏损 +22 |
+| APT | -78 → **-65** | 减仓后亏损收窄 +13 |
 
-出场信号仍然是唯一瓶颈——864 次信号出场亏损 -820.73 USDT（22.6% 胜率），靠 49 次 ROI (+1,515.94 USDT) 覆盖。
+> TRX 的 ATR% 极低（0.62%），达到 3 倍仓位上限（300 USDT），是双刃剑——趋势对时放大收益，趋势错时也放大亏损。LTC 是反例——被加仓但自身策略表现差，亏损被放大。
 
-### 可能的下一步
+### 遗留问题
 
-**出场信号优化** 是所有版本共同的遗留问题，也是提升空间最大的一步。常见做法：
-- 加确认：连续 2 根 K 线低于 SMA(50) 才出场
-- 改用 trailing stop 动态出场
-- 用更大周期 SMA(100) 作为出场线
+1. **出场信号仍是最大短板**——所有版本共同问题
+2. **TRX 等极低波动品种的仓位上限需要关注**——×3.0 cap 是否合理？
+3. **LTC/FIL/APT/OP 四个品种持续亏损**——可能需要考虑移除
 
 ---
 
-*报告生成时间: 2026-05-10 14:24 UTC*
-*实验版本: v4 (Long Only, 无限制持仓, 0.04% 费率, ATR波动率动态调仓)*
+*报告生成时间: 2026-05-10 14:44 UTC*
+*实验版本: v4 (Long Only, 无限制持仓, 0.04% 费率, ATR 动态调仓, 20 品种)*
